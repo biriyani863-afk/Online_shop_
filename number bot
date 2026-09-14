@@ -1,0 +1,497 @@
+import os
+import json
+import time
+import html
+import logging
+import telebot
+from telebot import types
+
+# -------------------------------------------------------------
+# কনফিগারেশন সেটআপ
+# -------------------------------------------------------------
+BOT_TOKEN = "8880587091:AAGsXm2CjBAj-BlMbQpM6fNde1_AA0CgHDA"
+ADMIN_CHAT_ID = 8434665762
+PAYMENT_NUMBER = "01953192653"
+DATA_FILE = "users_wallet.json"
+
+logging.basicConfig(level=logging.INFO)
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+# সার্ভিস ও রেট তালিকা
+NUMBER_PACKAGES = {
+    "num_1": {"name": "১. টেলিগ্রাম নাম্বার (Telegram)", "price": 50.0},
+    "num_2": {"name": "২. হোয়াটসঅ্যাপ নাম্বার (WhatsApp)", "price": 60.0},
+    "num_3": {"name": "৩. ইমোভেরিফিকেশন নাম্বার (IMO)", "price": 40.0},
+    "num_4": {"name": "৪. স্পেশাল কাস্টম নাম্বার ১", "price": 100.0}
+}
+
+def load_data() -> dict:
+    """ ফাইল থেকে ইউজার ডাটা ও সেশন লোড করে """
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    data = json.loads(content)
+                    data.setdefault("users", {})
+                    data.setdefault("pending", {})
+                    data.setdefault("sessions", {})
+                    return data
+        except Exception as e:
+            logging.error(f"Data load error: {e}")
+    return {"users": {}, "pending": {}, "sessions": {}}
+
+def save_data(data: dict) -> None:
+    """ ডাটা ফাইলে সেভ করে """
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Data save error: {e}")
+
+def get_user_session(user_id: int) -> dict:
+    db = load_data()
+    return db.get("sessions", {}).get(str(user_id), {})
+
+def set_user_session(user_id: int, session_data: dict) -> None:
+    db = load_data()
+    db["sessions"][str(user_id)] = session_data
+    save_data(db)
+
+def clear_user_session(user_id: int) -> None:
+    db = load_data()
+    if str(user_id) in db.get("sessions", {}):
+        del db["sessions"][str(user_id)]
+        save_data(db)
+
+def get_user_balance(user_id: int) -> float:
+    db = load_data()
+    return float(db.get("users", {}).get(str(user_id), {}).get("balance", 0.0))
+
+def update_user_balance(user_id: int, amount_change: float) -> float:
+    db = load_data()
+    u_str = str(user_id)
+    if u_str not in db["users"]:
+        db["users"][u_str] = {"balance": 0.0}
+    
+    curr = float(db["users"][u_str].get("balance", 0.0))
+    new_bal = curr + amount_change
+    db["users"][u_str]["balance"] = new_bal
+    save_data(db)
+    return new_bal
+
+def get_main_menu_keyboard() -> types.InlineKeyboardMarkup:
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("💳 টাকা যোগ করুন (Deposit)", callback_data="menu_deposit"),
+        types.InlineKeyboardButton("📱 নাম্বার কিনুন (Buy Number)", callback_data="menu_buy_number"),
+        types.InlineKeyboardButton("💰 আমার ব্যালেন্স", callback_data="menu_balance"),
+        types.InlineKeyboardButton("📞 হেল্পলাইন (যোগাযোগ)", callback_data="menu_helpline")
+    )
+    return markup
+
+def get_deposit_methods_keyboard() -> types.InlineKeyboardMarkup:
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("📱 বিকাশ (bKash)", callback_data="pay_bkash"),
+        types.InlineKeyboardButton("🍊 নগদ (Nagad)", callback_data="pay_nagad"),
+        types.InlineKeyboardButton("🚀 রকেট (Rocket)", callback_data="pay_rocket"),
+        types.InlineKeyboardButton("🔙 প্রধান মেনু", callback_data="menu_main")
+    )
+    return markup
+
+def get_buy_number_keyboard() -> types.InlineKeyboardMarkup:
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for pkg_id, pkg_info in NUMBER_PACKAGES.items():
+        btn_text = f"{pkg_info['name']} - ৳{pkg_info['price']:.0f}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"buy_pkg_{pkg_id}"))
+    markup.add(types.InlineKeyboardButton("🔙 প্রধান মেনু", callback_data="menu_main"))
+    return markup
+
+def get_main_menu_text(user_name: str, user_id: int) -> str:
+    bal = get_user_balance(user_id)
+    return (
+        f"<b>Welcome to Wallet Bot, {html.escape(user_name)}! 👋</b>\n\n"
+        f"🆔 <b>আপনার ইউজার ID:</b> <code>{user_id}</code>\n"
+        f"💰 <b>বর্তমান ওয়ালেট ব্যালেন্স:</b> <code>৳ {bal:.2f}</code>\n\n"
+        "👇 <b>নিচের যেকোনো বাটন সিলেক্ট করুন:</b>"
+    )
+
+@bot.message_handler(commands=['start'])
+def handle_start(message: types.Message):
+    user = message.from_user
+    clear_user_session(user.id)
+
+    if user.id == ADMIN_CHAT_ID:
+        admin_txt = (
+            "👑 <b>এডমিন প্যানেল সক্রিয়!</b>\n\n"
+            f"স্বাগতম এডমিন <b>{html.escape(user.first_name)}</b>!\n"
+            "ইউজাররা ডিপোজিট করলে সরাসরি আপনার ইনবক্সে <b>এপ্রুভ বাটনসহ</b> রিকোয়েস্ট আসবে।"
+        )
+        bot.send_message(message.chat.id, admin_txt, reply_markup=get_main_menu_keyboard())
+        return
+
+    txt = get_main_menu_text(user.first_name, user.id)
+    bot.send_message(message.chat.id, txt, reply_markup=get_main_menu_keyboard())
+
+@bot.message_handler(commands=['addbal'])
+def handle_addbal(message: types.Message):
+    """ এডমিন ম্যানুয়াল ব্যালেন্স অ্যাড: /addbal <user_id> <amount> """
+    if message.from_user.id != ADMIN_CHAT_ID:
+        return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 3:
+            bot.reply_to(message, "❌ নিয়ম: <code>/addbal <user_id> <amount></code>")
+            return
+        
+        target_id = int(parts[1])
+        amount = float(parts[2])
+
+        new_bal = update_user_balance(target_id, amount)
+        bot.reply_to(message, f"✅ ইউজার <code>{target_id}</code>-এ ৳{amount:.2f} যোগ করা হয়েছে। নতুন ব্যালেন্স: ৳{new_bal:.2f}")
+        
+        try:
+            bot.send_message(target_id, f"🎉 <b>এডমিন আপনার ওয়ালেটে ৳{amount:.2f} যোগ করেছেন!</b>\nবর্তমান ব্যালেন্স: <b>৳{new_bal:.2f}</b>")
+        except Exception as e:
+            logging.error(f"User notify error: {e}")
+    except Exception as e:
+        bot.reply_to(message, f"❌ ইনপুট এরর: {e}")
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback_query(call: types.CallbackQuery):
+    user = call.from_user
+    
+    if call.data == "menu_main":
+        clear_user_session(user.id)
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=get_main_menu_text(user.first_name, user.id),
+            reply_markup=get_main_menu_keyboard()
+        )
+
+    elif call.data == "menu_balance":
+        bal = get_user_balance(user.id)
+        msg = (
+            "<b>💳 আপনার ওয়ালেট ব্যালেন্স বিবরণ</b>\n\n"
+            f"👤 <b>ইউজার:</b> {html.escape(user.first_name)}\n"
+            f"🆔 <b>ইউজার ID:</b> <code>{user.id}</code>\n"
+            f"💰 <b>মোট ব্যালেন্স:</b> <code>৳ {bal:.2f}</code>\n\n"
+            "নতুন টাকা যোগ করতে নিচের <b>'টাকা যোগ করুন'</b> বাটনে ক্লিক করুন।"
+        )
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=msg,
+            reply_markup=get_main_menu_keyboard()
+        )
+
+    elif call.data == "menu_helpline":
+        msg = (
+            "<b>📞 হেল্পলাইন ও সাপোর্ট</b>\n\n"
+            "যেকোনো প্রয়োজনে বা পেমেন্ট সংক্রান্ত সহায়তার জন্য সরাসরি যোগাযোগ করুন:\n\n"
+            "👤 <b>এডমিন:</b> @nibir11525\n"
+            f"🆔 <b>এডমিন ID:</b> <code>{ADMIN_CHAT_ID}</code>"
+        )
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("💬 সরাসরি মেসেজ দিন", url="https://t.me/nibir11525"),
+            types.InlineKeyboardButton("🔙 প্রধান মেনু", callback_data="menu_main")
+        )
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=msg,
+            reply_markup=markup
+        )
+
+    elif call.data == "menu_deposit":
+        msg = (
+            "<b>💳 ডিপোজিট সেকশন</b>\n\n"
+            "আপনি কোন পেমেন্ট পদ্ধতির মাধ্যমে টাকা যোগ করতে চান?\n"
+            "নিচের যেকোনো একটি মেথড বেছে নিন:"
+        )
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=msg,
+            reply_markup=get_deposit_methods_keyboard()
+        )
+
+    elif call.data == "menu_buy_number":
+        bal = get_user_balance(user.id)
+        msg = (
+            "<b>📱 নাম্বার কেনার ড্যাশবোর্ড</b>\n\n"
+            f"💰 <b>আপনার বর্তমান ব্যালেন্স:</b> <code>৳ {bal:.2f}</code>\n\n"
+            "👇 <b>আপনি কোন ক্যাটাগরির নাম্বার কিনতে চান? নির্বাচন করুন:</b>"
+        )
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=msg,
+            reply_markup=get_buy_number_keyboard()
+        )
+
+    elif call.data.startswith("buy_pkg_"):
+        pkg_id = call.data.replace("buy_pkg_", "")
+        if pkg_id in NUMBER_PACKAGES:
+            pkg = NUMBER_PACKAGES[pkg_id]
+            price = pkg["price"]
+            name = pkg["name"]
+            user_bal = get_user_balance(user.id)
+
+            if user_bal < price:
+                bot.answer_callback_query(
+                    call.id,
+                    f"❌ পর্যাপ্ত ব্যালেন্স নেই! প্রয়োজন ৳{price:.2f}, আছে ৳{user_bal:.2f}",
+                    show_alert=True
+                )
+                return
+
+            new_bal = update_user_balance(user.id, -price)
+            bot.answer_callback_query(call.id, f"✅ {name} অর্ডার করা হয়েছে!", show_alert=True)
+            
+            success_msg = (
+                "🎉 <b>অর্ডার সফল হয়েছে!</b>\n\n"
+                f"📱 <b>আইটেম:</b> {name}\n"
+                f"💵 <b>মূল্য:</b> ৳ {price:.2f}\n"
+                f"💰 <b>অবশিষ্ট ব্যালেন্স:</b> ৳ {new_bal:.2f}\n\n"
+                "⏰ এডমিন খুব দ্রুত আপনাকে নাম্বারটি সরবরাহ করবে।"
+            )
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=success_msg,
+                reply_markup=get_main_menu_keyboard()
+            )
+
+            admin_order_msg = (
+                "🛒 <b>নতুন নাম্বার অর্ডার এসেছে!</b>\n\n"
+                f"👤 <b>ক্রেতা:</b> {html.escape(user.first_name)} (<code>{user.id}</code>)\n"
+                f"📱 <b>আইটেম:</b> {name}\n"
+                f"💵 <b>মূল্য:</b> ৳ {price:.2f}"
+            )
+            try:
+                bot.send_message(ADMIN_CHAT_ID, admin_order_msg)
+            except Exception as e:
+                logging.error(f"Admin notify error: {e}")
+
+    elif call.data in ["pay_bkash", "pay_nagad", "pay_rocket"]:
+        method_names = {
+            "pay_bkash": "বিকাশ (bKash)",
+            "pay_nagad": "নগদ (Nagad)",
+            "pay_rocket": "রকেট (Rocket)"
+        }
+        method = method_names[call.data]
+        set_user_session(user.id, {"step": "WAIT_AMOUNT", "method": method})
+
+        prompt = (
+            f"<b>╭━━━ 💳 {method} পেমেন্ট ━━━╮</b>\n\n"
+            "👇 <b>ধাপ ১/২:</b> আপনি কত টাকা পাঠাতে চান?\n\n"
+            "টাকার পরিমাণটি শুধুমাত্র সংখ্যায় লিখে টাইপ করে মেসেজ দিন (যেমন: <code>100</code> বা <code>500</code>):"
+        )
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=prompt
+        )
+
+    elif call.data.startswith("app_") or call.data.startswith("rej_"):
+        if user.id != ADMIN_CHAT_ID:
+            bot.answer_callback_query(call.id, "❌ আপনি এডমিন নন!", show_alert=True)
+            return
+
+        action, req_id = call.data.split("_", 1)
+        db = load_data()
+        pending = db.get("pending", {})
+
+        if req_id not in pending:
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text="❌ <b>এই পেমেন্ট রিকোয়েস্টটি ইতোমধ্যেই প্রসেস করা হয়েছে।</b>"
+            )
+            return
+
+        req = pending[req_id]
+        target_id = req["user_id"]
+        target_name = req["user_name"]
+        amount = float(req["amount"])
+        trx_id = req["trx_id"]
+        method = req["method"]
+
+        if action == "app":
+            u_str = str(target_id)
+            if u_str not in db["users"]:
+                db["users"][u_str] = {"balance": 0.0}
+
+            curr = float(db["users"][u_str].get("balance", 0.0))
+            new_bal = curr + amount
+            db["users"][u_str]["balance"] = new_bal
+            del db["pending"][req_id]
+            save_data(db)
+
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=(
+                    f"✅ <b>পেমেন্ট সফলভাবে এপ্রুভ করা হয়েছে!</b>\n\n"
+                    f"👤 <b>ইউজার:</b> {html.escape(target_name)} (<code>{target_id}</code>)\n"
+                    f"📱 <b>মেথড:</b> {method}\n"
+                    f"💵 <b>যোগকৃত টাকা:</b> <code>৳ {amount:.2f}</code>\n"
+                    f"💰 <b>ইউজারের নতুন ব্যালেন্স:</b> <code>৳ {new_bal:.2f}</code>\n"
+                    f"📝 <b>TrxID:</b> <code>{html.escape(trx_id)}</code>"
+                )
+            )
+
+            try:
+                user_msg = (
+                    "🎉 <b>অভিনন্দন! আপনার ডিপোজিট এপ্রুভ হয়েছে!</b>\n\n"
+                    f"💳 <b>পেমেন্ট মেথড:</b> {method}\n"
+                    f"💰 <b>জমা হওয়া টাকা:</b> <code>৳ {amount:.2f}</code>\n"
+                    f"📝 <b>TrxID:</b> <code>{html.escape(trx_id)}</code>\n\n"
+                    f"✅ আপনার নতুন ওয়ালেট ব্যালেন্স: <b>৳ {new_bal:.2f}</b>"
+                )
+                bot.send_message(target_id, user_msg)
+            except Exception as e:
+                logging.error(f"User notify error: {e}")
+
+        elif action == "rej":
+            del db["pending"][req_id]
+            save_data(db)
+
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=(
+                    f"❌ <b>পেমেন্ট রিকোয়েস্ট বাতিল করা হয়েছে।</b>\n\n"
+                    f"👤 <b>ইউজার:</b> {html.escape(target_name)} (<code>{target_id}</code>)\n"
+                    f"💵 <b>অ্যামাউন্ট:</b> ৳ {amount:.2f}\n"
+                    f"📝 <b>TrxID:</b> <code>{html.escape(trx_id)}</code>"
+                )
+            )
+
+            try:
+                user_msg = (
+                    "❌ <b>দুঃখিত! আপনার ডিপোজিট রিকোয়েস্টটি বাতিল করা হয়েছে।</b>\n\n"
+                    f"💵 <b>অ্যামাউন্ট:</b> ৳ {amount:.2f}\n"
+                    f"📝 <b>TrxID:</b> <code>{html.escape(trx_id)}</code>"
+                )
+                bot.send_message(target_id, user_msg)
+            except Exception as e:
+                logging.error(f"User notify error: {e}")
+
+@bot.message_handler(func=lambda message: True)
+def handle_text_messages(message: types.Message):
+    user = message.from_user
+    text = message.text.strip()
+    session = get_user_session(user.id)
+
+    # 📌 ধাপ ১: টাকার পরিমাণ ইনপুট
+    if session and session.get("step") == "WAIT_AMOUNT":
+        try:
+            amount_val = float(text)
+            if amount_val <= 0:
+                raise ValueError()
+        except ValueError:
+            err_msg = (
+                "❌ <b>ভুল ইনপুট!</b>\n\n"
+                "অনুগ্রহ করে টাকার পরিমাণটি শুধুমাত্র সংখ্যায় লিখে পাঠান (যেমন: <code>100</code>, <code>500</code>):"
+            )
+            bot.send_message(message.chat.id, err_msg)
+            return
+
+        method = session.get("method", "পেমেন্ট")
+        set_user_session(user.id, {
+            "step": "WAIT_TRXID",
+            "method": method,
+            "amount": amount_val
+        })
+
+        prompt = (
+            f"<b>╭━━━ 💳 {method} পেমেন্ট নির্দেশিকা ━━━╮</b>\n\n"
+            f"💰 <b>পাঠানোর পরিমাণ:</b> <code>৳ {amount_val:.2f}</code>\n"
+            f"📱 <b>{method} Personal Number:</b> <code>{PAYMENT_NUMBER}</code>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "📌 <b>টাকা পাঠানোর নিয়ম:</b>\n"
+            f"১. উপরের <code>{PAYMENT_NUMBER}</code> নম্বরে <b>Send Money (সেন্ড মানি)</b> করুন।\n"
+            "২. টাকা পাঠানোর পর প্রাপ্ত <b>TrxID (ট্রানজেকশন আইডি)</b> টি নিচে লিখে সেন্ড করুন।\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "👇 <b>এখন নিচে আপনার TrxID টি টাইপ করে পাঠান:</b>"
+        )
+        bot.send_message(message.chat.id, prompt)
+        return
+
+    # 📌 ধাপ ২: TrxID ইনপুট
+    elif session and session.get("step") == "WAIT_TRXID":
+        trx_id = text
+        amount = session.get("amount", 0.0)
+        method = session.get("method", "পেমেন্ট")
+        clear_user_session(user.id)
+
+        req_id = f"r_{int(time.time())}_{user.id}"
+
+        db = load_data()
+        db["pending"][req_id] = {
+            "user_id": user.id,
+            "user_name": user.first_name,
+            "username": user.username or "No Username",
+            "amount": amount,
+            "trx_id": trx_id,
+            "method": method
+        }
+        save_data(db)
+
+        # এডমিন ইনবক্সে বার্তা ও বাটন প্রেরণ
+        admin_markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_app = types.InlineKeyboardButton("✅ এপ্রুভ করুন", callback_data=f"app_{req_id}")
+        btn_rej = types.InlineKeyboardButton("❌ বাতিল করুন", callback_data=f"rej_{req_id}")
+        admin_markup.add(btn_app, btn_rej)
+
+        username_str = f"@{user.username}" if user.username else "No Username"
+        admin_msg = (
+            "🔔 <b>নতুন পেমেন্ট ডিপোজিট রিকোয়েস্ট!</b>\n\n"
+            f"👤 <b>প্রেরক:</b> {html.escape(user.first_name)} ({html.escape(username_str)})\n"
+            f"🆔 <b>ইউজার ID:</b> <code>{user.id}</code>\n"
+            f"📱 <b>মেথড:</b> {method}\n"
+            f"💵 <b>টাকার পরিমাণ:</b> <code>৳ {amount:.2f}</code>\n"
+            f"📝 <b>TrxID:</b> <code>{html.escape(trx_id)}</code>\n\n"
+            "👇 <b>ভেরিফাই করে নিচের যেকোনো বাটনে ক্লিক করুন:</b>"
+        )
+
+        try:
+            bot.send_message(ADMIN_CHAT_ID, admin_msg, reply_markup=admin_markup)
+            logging.info(f"Admin notified for req: {req_id}")
+        except Exception as e:
+            logging.error(f"Failed to notify admin: {e}")
+
+        markup_main = types.InlineKeyboardMarkup()
+        markup_main.add(types.InlineKeyboardButton("🔙 প্রধান মেনু", callback_data="menu_main"))
+
+        conf_txt = (
+            "🎉 <b>আপনার ডিপোজিট তথ্য সফলভাবে জমা হয়েছে!</b>\n\n"
+            f"• <b>পেমেন্ট মেথড:</b> {method}\n"
+            f"• <b>টাকার পরিমাণ:</b> ৳ {amount:.2f}\n"
+            f"• <b>TrxID:</b> <code>{html.escape(trx_id)}</code>\n\n"
+            "⏰ এডমিন ভেরিফাই করে খুব দ্রুত আপনার ওয়ালেটে ব্যালেন্স যুক্ত করে দেবে।"
+        )
+        bot.send_message(message.chat.id, conf_txt, reply_markup=markup_main)
+        return
+
+    else:
+        bot.send_message(
+            message.chat.id,
+            get_main_menu_text(user.first_name, user.id),
+            reply_markup=get_main_menu_keyboard()
+        )
+
+if __name__ == "__main__":
+    print("=" * 50)
+    print("🤖 টেলিগ্রাম বট রান হচ্ছে...")
+    print(f"👑 এডমিন ID: {ADMIN_CHAT_ID}")
+    print(f"📱 পেমেন্ট নম্বর: {PAYMENT_NUMBER}")
+    print("=" * 50)
+    
+    bot.infinity_polling(skip_pending=True)
